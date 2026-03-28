@@ -1,235 +1,289 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
 """
 Конкурс «Кентавры нашего времени» — НИУ ВШЭ / Лаборатория «Молодёжная политика»
 Задача: спрогнозировать заголовки СМИ на 2 апреля 2026 года
 Модель: openai/gpt-4o (через OpenRouter)
-Автор: [ваше имя]
+Автор: Обухова Полина Олеговна
 """
 
-import requests
+import os
+import re
 import json
 from datetime import datetime
 
-# ─────────────────────────────────────────────
-# 1. КОНФИГУРАЦИЯ
-# ─────────────────────────────────────────────
-API_KEY = "sk-or-v1-XXXXXXXXXXXXXXXX"   # ← вставьте свой ключ OpenRouter
-MODEL   = "openai/gpt-4o"               # сильная модель для реалистичности
+import requests
 
-# Резервные бесплатные модели (если нет доступа к GPT-4o):
-# "meta-llama/llama-3.3-70b-instruct:free"
-# "google/gemma-3-27b-it:free"
-# "anthropic/claude-3.5-sonnet"         (требует отдельный ключ)
+# ─────────────────────────────────────────────
+# 1. CONFIG
+# ─────────────────────────────────────────────
+API_KEY = os.getenv("OPENROUTER_API_KEY")
+if not API_KEY:
+    raise ValueError("OPENROUTER_API_KEY не задан")
 
+MODEL = "openai/gpt-4o"
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
+HEADERS = {
+    "Authorization": f"Bearer {API_KEY}",
+    "Content-Type": "application/json",
+    "HTTP-Referer": "https://extra.hse.ru",
+    "X-Title": "HSE Centaur News Forecast 2026",
+}
+
 # ─────────────────────────────────────────────
-# 2. РЕАЛЬНЫЙ ФАКТОЛОГИЧЕСКИЙ КОНТЕКСТ
-#    (собран из открытых источников на 26 марта 2026)
+# 2. SYSTEM PROMPTS
 # ─────────────────────────────────────────────
-WORLD_CONTEXT = """
-АКТУАЛЬНЫЙ КОНТЕКСТ НА 26 МАРТА 2026 (источник: открытые СМИ):
+GENERATION_SYSTEM_PROMPT = """You are an experienced international news editor.
 
-[ВОЙНА США–ИРАН, АКТИВНАЯ ФАЗА]
-- С января 2026 США и Израиль ведут военные операции против Ирана.
-- 25–26 марта США нанесли авиаудары более чем по 10 000 иранских военных целей,
-  включая о. Харг — ключевой нефтяной хаб (90% экспорта нефти Ирана).
-- Нефтяные цены выросли более чем на 40% с начала конфликта.
-- США направили 1000+ военнослужащих морской пехоты в регион; рассматривается наземная операция.
-- Иран закрыл Ормузский пролив, угрожает ударами по Бахрейну и ОАЭ.
-- Иран отверг мирный план США из 15 пунктов; в переговорах участвуют Пакистан и Египет.
-- Белый дом: «переговоры продолжаются и продуктивны»; Иран: «никаких переговоров нет».
-- США рассматривают удар по электростанциям Ирана; назначен 48-часовой ультиматум.
+TASK:
+Create a realistic forecast of a news item that could be published on April 2, 2026 by the specified outlet.
 
-[ВОЙНА В УКРАИНЕ — ВЕСЕННЕЕ НАСТУПЛЕНИЕ РОСCИИ 2026]
-- С 17–21 марта 2026 Россия начала весенне-летнее наступление на «Крепостной пояс» в Донецкой обл.
-- Направление главного удара: Лиман → Славянск → Краматорск.
-- Мирные переговоры в Женеве (февраль) и Абу-Даби зашли в тупик: Россия требует отхода Украины
-  из части Донецкой области, Украина отвергает ультиматум.
-- США поставили дедлайн — мир до июня 2026, но сами заняты Ираном.
-- Украина испытывает дефицит систем ПВО; Зеленский предупредил о дефиците ракет.
+STRICT RULES:
+1. The output language MUST exactly match the requested language.
+2. Use ONLY facts explicitly present in the provided context.
+3. Do NOT invent quotes, locations, numbers, outcomes, delays, injuries, statements or decisions that are not in the context.
+4. Match the outlet's style closely.
+5. Headline: maximum 12 words.
+6. Lead: 3–5 sentences, about 80–120 words.
+7. Avoid exaggerated language and avoid generic filler.
+8. If the context says that something is not fully confirmed, preserve that uncertainty.
 
-[ГОДОВЩИНА ТАРИФОВ «LIBERATION DAY»]
-- 2 апреля 2025 Трамп объявил масштабные «взаимные» тарифы — «Liberation Day».
-- 2 апреля 2026 — ровно 1 год: СМИ публикуют итоговый анализ.
-- Инфляция в еврозоне: февраль 2026 — 1,9% (целевой показатель ЕЦБ — 2%).
-- Flash-оценка HICP за март 2026 вышла 31 марта; полные данные — 16 апреля.
-- США–Индия: тариф снижен с 25% до 18% (февраль 2026); ведутся переговоры с ЕС.
+OUTPUT FORMAT:
+**HEADLINE:** ...
+**LEAD:** ...
+"""
 
-[ВСЕМИРНЫЙ ДЕНЬ ЗНАНИЙ ОБ АУТИЗМЕ]
-- 2 апреля — официальный день ООН (с 2007). Тема 2026: «Autism and Humanity: Every Life Has Value».
-- ВОЗ: 1 из 100 детей в мире — аутист; акцент на инклюзии и доступности диагностики.
+REWRITE_SYSTEM_PROMPT = """You are a strict copy editor and fact-checking editor.
 
-[ДЕНЬ ЕДИНЕНИЯ БЕЛАРУСИ И России]
-- 2 апреля — годовщина Договора о Союзном государстве (подписан в 1996/1997 гг.).
-- В 2026 году отмечается в условиях продолжающейся войны в Украине и западных санкций.
+TASK:
+Rewrite the draft so that:
+1. The language exactly matches the requested language.
+2. The style matches the outlet.
+3. Every factual element is supported by the provided context.
+4. Unsupported details are removed.
+5. The text remains natural, concise and news-like.
+
+DO NOT:
+- add new facts
+- add quotes not present in the context
+- add specific numbers unless they are in the context
+- change the topic
+
+OUTPUT FORMAT:
+**HEADLINE:** ...
+**LEAD:** ...
 """
 
 # ─────────────────────────────────────────────
-# 3. СИСТЕМНЫЙ ПРОМПТ (улучшенный)
-# ─────────────────────────────────────────────
-SYSTEM_PROMPT = """Ты — опытный международный журналист с 20-летним стажем в Reuters, BBC и Financial Times.
-
-ЗАДАЧА: Создай реалистичный прогноз новостного материала, который мог бы выйти 2 апреля 2026 года в указанном СМИ.
-
-ОБЯЗАТЕЛЬНЫЕ ТРЕБОВАНИЯ:
-1. Заголовок — конкретный, точный, без пустых слов. Не более 12 слов.
-2. Лид (первый абзац) — отвечает на 5 вопросов журналистики: Кто? Что? Где? Когда? Почему?
-   Объём: 3–5 предложений, ~80–120 слов.
-3. Используй реальные имена политиков, места, достоверные цифры из контекста.
-4. Соблюдай стиль конкретного издания (указан в запросе).
-5. Если СМИ работает на русском — пиши на русском.
-6. Строго опирайся на предоставленный фактологический контекст — не выдумывай события.
-
-ФОРМАТ ОТВЕТА (строго):
-**ЗАГОЛОВОК:** [заголовок]
-**ЛИД:** [первый абзац]"""
-
-# ─────────────────────────────────────────────
-# 4. ПЯТЬ ПРОГНОЗОВ: издания и темы
+# 3. FORECASTS WITH SEPARATE VERIFIED CONTEXTS
 # ─────────────────────────────────────────────
 forecasts = [
     {
         "id": 1,
-        "outlet": "Reuters",
+        "outlet": "UN News",
         "language": "English",
-        "tone": "нейтральный, лаконичный стиль информационного агентства",
-        "user_prompt": f"""Дата публикации: 2 апреля 2026.
-Издание: Reuters (новостное агентство, нейтральный английский).
-Тема: Война США–Иран. Итог переговоров/военных действий на 2 апреля.
-Специфика: в конце марта шли переговоры через Пакистан, США угрожали ударом по электростанциям,
-Иран отверг мирный план из 15 пунктов, ситуация крайне нестабильна.
-
-Контекст: {WORLD_CONTEXT}
-
-Напиши реалистичный заголовок и лид новости Reuters на 2 апреля 2026 года."""
+        "tone": "official UN informative and rights-based style",
+        "context": """
+[WORLD AUTISM AWARENESS DAY]
+- April 2 is World Autism Awareness Day, a UN observance.
+- UN observance pages list the 2026 event on Thursday, 2 April 2026.
+- The 2026 theme is "Autism and Humanity – Every Life Has Value".
+- WHO says that in 2021 about 1 in 127 persons had autism.
+- WHO says care for autistic people needs greater accessibility, inclusivity and support.
+- A strong likely angle is dignity, inclusion, rights and access to support.
+""",
+        "user_prompt": """Publication date: April 2, 2026.
+Outlet: UN News.
+Language: English.
+Topic: World Autism Awareness Day 2026.
+Specifics: official UN tone; focus on dignity, inclusion, rights, accessibility, support and the official 2026 theme.
+Generate a realistic headline and lead."""
     },
     {
         "id": 2,
         "outlet": "Financial Times",
         "language": "English",
-        "tone": "аналитический, деловой, экономический",
-        "user_prompt": f"""Дата публикации: 2 апреля 2026.
-Издание: Financial Times (деловое издание, аналитический английский).
-Тема: Годовщина тарифов «Liberation Day» — ровно 1 год. Итоги для мировой торговли и экономики.
-Специфика: нефтяные цены +40% из-за ирано-американской войны, инфляция в еврозоне 1,9%,
-тарифные переговоры с ЕС и Индией продолжаются, мировая торговля перестраивается.
-
-Контекст: {WORLD_CONTEXT}
-
-Напиши реалистичный заголовок и лид новости Financial Times на 2 апреля 2026 года."""
+        "tone": "analytical business and economics style",
+        "context": """
+[ONE YEAR AFTER TRUMP'S APRIL 2, 2025 TARIFFS]
+- On April 2, 2025, the White House issued a presidential action titled:
+  "Regulating Imports with a Reciprocal Tariff to Rectify Trade Practices that Contribute to Large and Persistent Annual United States Goods Trade Deficits".
+- The White House text says Trump declared a national emergency linked to large and persistent U.S. goods trade deficits.
+- Reuters reported on April 2, 2025 that Trump unveiled global reciprocal tariffs at the White House.
+- Reuters also reported that the new scheme included a baseline tariff of 10% and higher rates for some major trading partners.
+- AP described April 2 as "Liberation Day", reflecting Trump's own framing.
+- A realistic one-year lookback angle is global trade, supply chains, investor uncertainty and inflation pressure.
+""",
+        "user_prompt": """Publication date: April 2, 2026.
+Outlet: Financial Times.
+Language: English.
+Topic: One year after Trump's April 2, 2025 reciprocal tariffs.
+Specifics: analytical business angle; focus on trade, supply chains, inflation pressure, business adaptation and uncertainty one year later.
+Generate a realistic headline and lead."""
     },
     {
         "id": 3,
-        "outlet": "The Guardian",
-        "language": "English",
-        "tone": "критический, с акцентом на гуманитарные последствия",
-        "user_prompt": f"""Дата публикации: 2 апреля 2026.
-Издание: The Guardian (британская качественная пресса, критический взгляд).
-Тема: Весеннее наступление России на Украину — Крепостной пояс под угрозой.
-Специфика: США отвлечены войной с Ираном, Украина в дефиците ПВО, мирные переговоры
-зашли в тупик, дедлайн — июнь 2026, Россия давит на Лиман и Славянск.
-
-Контекст: {WORLD_CONTEXT}
-
-Напиши реалистичный заголовок и лид новости The Guardian на 2 апреля 2026 года."""
+        "outlet": "ТАСС",
+        "language": "Russian",
+        "tone": "official Russian state-agency style",
+        "context": """
+[ДЕНЬ ЕДИНЕНИЯ НАРОДОВ БЕЛАРУСИ И РОССИИ]
+- День единения народов Беларуси и России ежегодно отмечается 2 апреля.
+- Союзный ресурс soyuz.by пишет, что 2 апреля 1997 года был подписан Договор об образовании Сообщества Беларуси и России, и с тех пор 2 апреля отмечается как День единения.
+- BelTA сообщала, что в 2025 году в Минске и Москве проходили мероприятия по случаю этой даты.
+- Belarus.by публиковал поздравление Александра Лукашенко, где 2 апреля описывается как символ братства, общей истории и духовной близости.
+- Наиболее вероятный угол освещения: официальные поздравления, символическое значение даты, интеграция, Союзное государство, совместные мероприятия.
+""",
+        "user_prompt": """Дата публикации: 2 апреля 2026.
+Издание: ТАСС.
+Язык: русский.
+Тема: День единения народов Беларуси и России.
+Специфика: официальный стиль, акцент на символическом значении даты, союзнических отношениях, интеграции и мероприятиях.
+Сгенерируй реалистичный заголовок и первый абзац."""
     },
     {
         "id": 4,
-        "outlet": "РИА Новости",
-        "language": "Russian",
-        "tone": "официальный российский медиастиль, патриотический нарратив",
-        "user_prompt": f"""Дата публикации: 2 апреля 2026.
-Издание: РИА Новости (российское государственное агентство, официальный стиль).
-Тема: День единения народов Беларуси и России — юбилей Союзного государства.
-Специфика: годовщина подписания Договора 1996/1997 гг. В 2026 году — в контексте войны
-на Украине и союзнического взаимодействия Москвы и Минска. Ожидаются заявления Путина и Лукашенко.
-
-Контекст: {WORLD_CONTEXT}
-
-Напиши реалистичный заголовок и лид новости РИА Новости на 2 апреля 2026 года (на русском языке)."""
+        "outlet": "UEFA.com",
+        "language": "English",
+        "tone": "official football reporting style",
+        "context": """
+[UEFA WOMEN'S CHAMPIONS LEAGUE QUARTER-FINAL SECOND LEGS]
+- UEFA's official fixtures list Thursday 2 April 2026 as the day of quarter-finals, second legs.
+- Barcelona host Real Madrid on April 2 at 18:45 CET.
+- UEFA's first-leg report shows Real Madrid 2-6 Barcelona.
+- OL Lyonnes host Wolfsburg on April 2 at 21:00 CET.
+- UEFA's official fixtures/results page shows Wolfsburg leading that tie 1-0 after the first leg.
+- A realistic angle is a preview or day-of-match piece focused on aggregate scorelines, comeback pressure and the race for the semi-finals.
+""",
+        "user_prompt": """Publication date: April 2, 2026.
+Outlet: UEFA.com.
+Language: English.
+Topic: UEFA Women's Champions League quarter-final second legs.
+Specifics: Barcelona vs Real Madrid and OL Lyonnes vs Wolfsburg. Use official match-centre or preview style, with focus on aggregate scores and semi-final stakes.
+Generate a realistic headline and lead."""
     },
     {
         "id": 5,
-        "outlet": "UN News / ВОЗ",
+        "outlet": "Reuters",
         "language": "English",
-        "tone": "информационно-правозащитный стиль ООН/ВОЗ",
-        "user_prompt": f"""Дата публикации: 2 апреля 2026.
-Издание: UN News (официальный сайт ООН, информационно-правозащитный стиль).
-Тема: Всемирный день распространения знаний об аутизме — тема 2026: «Autism and Humanity: Every Life Has Value».
-Специфика: ВОЗ — 1 из 100 детей в мире аутист; глобальный призыв к инклюзии, доступности
-диагностики и защите прав людей с РАС.
-
-Контекст: {WORLD_CONTEXT}
-
-Напиши реалистичный заголовок и лид материала UN News на 2 апреля 2026 года."""
-    }
+        "tone": "neutral, concise wire-service style",
+        "context": """
+[NASA / ARTEMIS II / SLS]
+- Artemis II is NASA's first crewed Artemis mission and a crewed lunar flyby mission.
+- NASA says launch is targeted no earlier than April 1, 2026.
+- NASA says the target time is no earlier than 6:24 p.m. EDT on Wednesday, April 1, with additional launch opportunities through Monday, April 6.
+- NASA says the crew is Reid Wiseman, Victor Glover, Christina Koch and Jeremy Hansen.
+- NASA says the mission will be about 10 days around the Moon.
+- Reuters reported on March 27, 2026 that the Artemis II astronauts were in final preparations for a launch around April 1.
+- A realistic Reuters angle for April 2 is launch-window coverage, second-window coverage, or a significance/explainer piece about the mission.
+- It is NOT confirmed in the context that NASA fixed the launch exactly on April 2.
+- It is also NOT confirmed in the context that an April 1 launch attempt failed due to weather.
+""",
+        "user_prompt": """Publication date: April 2, 2026.
+Outlet: Reuters.
+Language: English.
+Topic: NASA Artemis II / SLS Moon mission.
+Specifics: Reuters wire style. Use only the provided facts. Preserve uncertainty if the launch timing remains within a window.
+Generate a realistic headline and lead."""
+    },
 ]
 
 # ─────────────────────────────────────────────
-# 5. ФУНКЦИЯ ЗАПРОСА К API
+# 4. HELPERS
 # ─────────────────────────────────────────────
-def get_forecast(forecast: dict) -> dict:
-    """Отправляет запрос к OpenRouter и возвращает результат."""
+def chat_completion(system_prompt: str, user_prompt: str, temperature: float = 0.25, max_tokens: int = 500) -> dict:
     response = requests.post(
-        url=OPENROUTER_URL,
-        headers={
-            "Authorization": f"Bearer {API_KEY}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": "https://extra.hse.ru",   # рекомендуется OpenRouter
-            "X-Title": "HSE Centaur News Forecast 2026"
-        },
+        OPENROUTER_URL,
+        headers=HEADERS,
         json={
             "model": MODEL,
             "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user",   "content": forecast["user_prompt"]}
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
             ],
-            "temperature": 0.65,   # чуть ниже дефолта — точнее, но без шаблонности
-            "max_tokens": 600,
-            "top_p": 0.9
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "top_p": 0.9,
         },
-        timeout=60
+        timeout=60,
     )
     response.raise_for_status()
-    data = response.json()
-    text = data["choices"][0]["message"]["content"]
+    return response.json()
 
-    return {
-        "id":            forecast["id"],
-        "outlet":        forecast["outlet"],
-        "language":      forecast["language"],
-        "model":         MODEL,
-        "system_prompt": SYSTEM_PROMPT,
-        "user_prompt":   forecast["user_prompt"],
-        "forecast":      text,
-        "tokens_used":   data.get("usage", {}).get("total_tokens", "n/a"),
-        "generated_at":  datetime.now().isoformat()
-    }
+
+def generate_draft(forecast: dict) -> tuple[str, int]:
+    user_message = (
+        f"Outlet: {forecast['outlet']}\n"
+        f"Language: {forecast['language']}\n"
+        f"Tone: {forecast['tone']}\n\n"
+        f"Context:\n{forecast['context']}\n\n"
+        f"Assignment:\n{forecast['user_prompt']}"
+    )
+    data = chat_completion(GENERATION_SYSTEM_PROMPT, user_message, temperature=0.25, max_tokens=500)
+    text = data["choices"][0]["message"]["content"]
+    tokens = data.get("usage", {}).get("total_tokens", 0)
+    return text, tokens
+
+
+def rewrite_draft(forecast: dict, draft: str) -> tuple[str, int]:
+    user_message = (
+        f"Outlet: {forecast['outlet']}\n"
+        f"Language: {forecast['language']}\n"
+        f"Tone: {forecast['tone']}\n\n"
+        f"Context:\n{forecast['context']}\n\n"
+        f"Draft to repair:\n{draft}\n\n"
+        f"Please rewrite the draft so it strictly follows the context and the outlet style."
+    )
+    data = chat_completion(REWRITE_SYSTEM_PROMPT, user_message, temperature=0.1, max_tokens=500)
+    text = data["choices"][0]["message"]["content"]
+    tokens = data.get("usage", {}).get("total_tokens", 0)
+    return text, tokens
+
 
 # ─────────────────────────────────────────────
-# 6. ЗАПУСК И СОХРАНЕНИЕ
+# 5. MAIN
 # ─────────────────────────────────────────────
 if __name__ == "__main__":
     results = []
 
     for fc in forecasts:
-        print(f"\n{'='*65}")
-        print(f"📰  #{fc['id']}  {fc['outlet']}  ({fc['language']})")
-        print("="*65)
-        try:
-            result = get_forecast(fc)
-            results.append(result)
-            print(result["forecast"])
-            print(f"\n[Токены: {result['tokens_used']}]")
-        except requests.HTTPError as e:
-            print(f"❌ HTTP-ошибка {e.response.status_code}: {e.response.text}")
-        except Exception as e:
-            print(f"❌ Ошибка: {e}")
+        print(f"\n{'=' * 65}")
+        print(f"  #{fc['id']}  {fc['outlet']}  ({fc['language']})")
+        print("=" * 65)
 
-    # Сохранение JSON
+        try:
+            draft_text, draft_tokens = generate_draft(fc)
+            final_text, rewrite_tokens = rewrite_draft(fc, draft_text)
+
+            total_tokens = draft_tokens + rewrite_tokens
+
+            result = {
+                "id": fc["id"],
+                "outlet": fc["outlet"],
+                "language": fc["language"],
+                "model": MODEL,
+                "tone": fc["tone"],
+                "context": fc["context"].strip(),
+                "user_prompt": fc["user_prompt"].strip(),
+                "draft_forecast": draft_text,
+                "forecast": final_text,
+                "tokens_used": total_tokens,
+                "generated_at": datetime.now().isoformat(),
+            }
+
+            results.append(result)
+            print(final_text)
+            print(f"\n[Total tokens: {total_tokens}]")
+
+        except requests.HTTPError as e:
+            print(f"HTTP error {e.response.status_code}: {e.response.text}")
+        except Exception as e:
+            print(f"Error: {e}")
+
     output_path = "forecasts_april2_2026.json"
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(results, f, ensure_ascii=False, indent=2)
-    print(f"\n✅ Все прогнозы сохранены в {output_path}")
+
+    print(f"\nAll forecasts saved to {output_path}")
